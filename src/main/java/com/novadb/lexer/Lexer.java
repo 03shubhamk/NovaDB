@@ -37,10 +37,11 @@ public class Lexer {
         KEYWORDS.put("AND", TokenType.AND);
         KEYWORDS.put("OR", TokenType.OR);
 
-        // Transactions
         KEYWORDS.put("BEGIN", TokenType.BEGIN);
         KEYWORDS.put("COMMIT", TokenType.COMMIT);
         KEYWORDS.put("ROLLBACK", TokenType.ROLLBACK);
+        KEYWORDS.put("INDEX", TokenType.INDEX);
+        KEYWORDS.put("ON", TokenType.ON);
 
         // Types
         KEYWORDS.put("INT", TokenType.INT);

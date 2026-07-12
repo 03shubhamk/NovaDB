@@ -46,8 +46,18 @@ public class Parser {
     }
 
     private Statement statement() {
-        if (match(TokenType.CREATE)) return createTableStatement();
-        if (match(TokenType.DROP)) return dropTableStatement();
+        if (check(TokenType.CREATE)) {
+            advance();
+            if (match(TokenType.TABLE)) return createTableStatementRest();
+            if (match(TokenType.INDEX)) return createIndexStatementRest();
+            throw new NovaDBException("Expected 'TABLE' or 'INDEX' keyword after 'CREATE' at position " + peek().position() + ".");
+        }
+        if (check(TokenType.DROP)) {
+            advance();
+            if (match(TokenType.TABLE)) return dropTableStatementRest();
+            if (match(TokenType.INDEX)) return dropIndexStatementRest();
+            throw new NovaDBException("Expected 'TABLE' or 'INDEX' keyword after 'DROP' at position " + peek().position() + ".");
+        }
         if (match(TokenType.INSERT)) return insertStatement();
         if (match(TokenType.SELECT)) return selectStatement();
         if (match(TokenType.UPDATE)) return updateStatement();
@@ -61,8 +71,7 @@ public class Parser {
         throw new NovaDBException("Syntax error: Expected SQL command (SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, BEGIN, COMMIT, ROLLBACK) at position " + peek().position() + ".");
     }
 
-    private Statement createTableStatement() {
-        consume(TokenType.TABLE, "Expected 'TABLE' keyword after 'CREATE'.");
+    private Statement createTableStatementRest() {
         Token tableName = consume(TokenType.IDENTIFIER, "Expected table name.");
         consume(TokenType.LPAREN, "Expected '(' before column definitions.");
 
@@ -98,10 +107,24 @@ public class Parser {
         return new CreateTableStatement(tableName.lexeme(), columns);
     }
 
-    private Statement dropTableStatement() {
-        consume(TokenType.TABLE, "Expected 'TABLE' keyword after 'DROP'.");
+    private Statement dropTableStatementRest() {
         Token tableName = consume(TokenType.IDENTIFIER, "Expected table name.");
         return new DropTableStatement(tableName.lexeme());
+    }
+
+    private Statement createIndexStatementRest() {
+        Token indexName = consume(TokenType.IDENTIFIER, "Expected index name.");
+        consume(TokenType.ON, "Expected 'ON' keyword.");
+        Token tableName = consume(TokenType.IDENTIFIER, "Expected table name.");
+        consume(TokenType.LPAREN, "Expected '(' before column name.");
+        Token columnName = consume(TokenType.IDENTIFIER, "Expected indexed column name.");
+        consume(TokenType.RPAREN, "Expected ')' after column name.");
+        return new CreateIndexStatement(indexName.lexeme(), tableName.lexeme(), columnName.lexeme());
+    }
+
+    private Statement dropIndexStatementRest() {
+        Token indexName = consume(TokenType.IDENTIFIER, "Expected index name.");
+        return new DropIndexStatement(indexName.lexeme());
     }
 
     private Statement insertStatement() {

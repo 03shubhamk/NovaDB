@@ -6,6 +6,11 @@ import com.novadb.catalog.DataType;
 import com.novadb.catalog.Schema;
 import com.novadb.exception.NovaDBException;
 
+import com.novadb.index.IndexInfo;
+import com.novadb.index.IndexManager;
+import com.novadb.storage.Row;
+import com.novadb.storage.StorageManager;
+
 import java.io.*;
 import java.nio.file.*;
 import java.util.ArrayList;
@@ -26,10 +31,7 @@ public class PersistenceManager {
         this.dataDirectory = dataDirectory;
     }
 
-    /**
-     * Serializes all registered table schemas to metadata.ndb.
-     */
-    public synchronized void persistCatalog(CatalogManager catalog) {
+    public synchronized void persistCatalog(CatalogManager catalog, IndexManager indexManager) {
         Path file = dataDirectory.resolve("metadata.ndb");
         try {
             Files.createDirectories(dataDirectory);
@@ -49,6 +51,15 @@ public class PersistenceManager {
                         out.writeInt(col.length() == null ? -1 : col.length());
                     }
                 }
+                
+                // Write active indexes
+                List<IndexInfo> allIndexes = indexManager.getAllIndexes();
+                out.writeInt(allIndexes.size());
+                for (IndexInfo idx : allIndexes) {
+                    out.writeUTF(idx.indexName());
+                    out.writeUTF(idx.tableName());
+                    out.writeUTF(idx.columnName());
+                }
             });
         } catch (IOException e) {
             throw new NovaDBException("Failed to persist database catalog metadata: " + e.getMessage(), e);
@@ -58,7 +69,7 @@ public class PersistenceManager {
     /**
      * Parses metadata.ndb and loads registered table schemas.
      */
-    public synchronized void loadCatalog(CatalogManager catalog) {
+    public synchronized void loadCatalog(CatalogManager catalog, IndexManager indexManager) {
         Path file = dataDirectory.resolve("metadata.ndb");
         if (!Files.exists(file)) {
             return; // Fresh database setup
@@ -87,6 +98,23 @@ public class PersistenceManager {
                     columns.add(new Column(colName, type, length));
                 }
                 catalog.addTable(tableName, new Schema(columns));
+            }
+            
+            // Read active indexes list (with backward compatibility fallback)
+            int indexCount = 0;
+            try {
+                if (in.available() > 0) {
+                    indexCount = in.readInt();
+                }
+            } catch (EOFException e) {
+                // Ignore, old metadata file version
+            }
+            indexManager.clear();
+            for (int i = 0; i < indexCount; i++) {
+                String indexName = in.readUTF();
+                String tableName = in.readUTF();
+                String columnName = in.readUTF();
+                indexManager.registerIndexInfo(new IndexInfo(indexName, tableName, columnName));
             }
         } catch (IOException | IllegalArgumentException e) {
             throw new NovaDBException("Failed to load database catalog metadata: " + e.getMessage(), e);

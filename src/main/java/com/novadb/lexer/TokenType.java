@@ -31,6 +31,7 @@ public enum TokenType {
     ASC, DESC,
     AND, OR,
     BEGIN, COMMIT, ROLLBACK,
+    INDEX, ON,
     
     // Data Types
     INT, DOUBLE, VARCHAR, TEXT, BOOLEAN,
