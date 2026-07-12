@@ -1,6 +1,7 @@
 package com.novadb;
 
 import com.novadb.catalog.CatalogManager;
+import com.novadb.catalog.Schema;
 import com.novadb.common.QueryResult;
 import com.novadb.exception.NovaDBException;
 import com.novadb.executor.Executor;
@@ -8,6 +9,8 @@ import com.novadb.lexer.Lexer;
 import com.novadb.lexer.Token;
 import com.novadb.parser.Parser;
 import com.novadb.parser.Statement;
+import com.novadb.storage.PersistenceManager;
+import com.novadb.storage.Row;
 import com.novadb.storage.StorageManager;
 
 import java.io.IOException;
@@ -28,6 +31,7 @@ public class DatabaseEngine implements AutoCloseable {
     private final Path dataDirectory;
     private final CatalogManager catalog;
     private final StorageManager storage;
+    private final PersistenceManager persistence;
     private final Executor executor;
     private boolean active;
 
@@ -50,7 +54,8 @@ public class DatabaseEngine implements AutoCloseable {
         this.dataDirectory = Paths.get(dataDir).toAbsolutePath().normalize();
         this.catalog = new CatalogManager();
         this.storage = new StorageManager();
-        this.executor = new Executor(this.catalog, this.storage);
+        this.persistence = new PersistenceManager(this.dataDirectory);
+        this.executor = new Executor(this.catalog, this.storage, this.persistence);
     }
 
     /**
@@ -64,6 +69,20 @@ public class DatabaseEngine implements AutoCloseable {
         try {
             Files.createDirectories(dataDirectory);
             LOGGER.log(Level.INFO, "NovaDB starting up. Data storage path: {0}", dataDirectory);
+            
+            // Load catalog schemas
+            persistence.loadCatalog(catalog);
+            
+            // Rehydrate stored table records
+            for (String tableName : catalog.getTableNames()) {
+                Schema schema = catalog.getSchema(tableName);
+                storage.createTable(tableName);
+                List<Row> rows = persistence.loadTable(tableName, schema);
+                for (Row row : rows) {
+                    storage.insertRow(tableName, row);
+                }
+            }
+            
             active = true;
         } catch (IOException e) {
             throw new NovaDBException("Failed to initialize data directories: " + dataDirectory, e);
@@ -137,6 +156,10 @@ public class DatabaseEngine implements AutoCloseable {
 
     public StorageManager getStorage() {
         return storage;
+    }
+
+    public PersistenceManager getPersistence() {
+        return persistence;
     }
 
     @Override

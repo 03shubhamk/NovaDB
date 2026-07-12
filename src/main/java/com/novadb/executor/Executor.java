@@ -5,6 +5,7 @@ import com.novadb.common.QueryResult;
 import com.novadb.exception.NovaDBException;
 import com.novadb.parser.*;
 import com.novadb.parser.expression.*;
+import com.novadb.storage.PersistenceManager;
 import com.novadb.storage.Row;
 import com.novadb.storage.StorageManager;
 
@@ -18,13 +19,15 @@ import java.util.List;
 public class Executor {
     private final CatalogManager catalog;
     private final StorageManager storage;
+    private final PersistenceManager persistence;
 
     /**
-     * Initializes the Executor with catalog and storage managers.
+     * Initializes the Executor with catalog, storage, and persistence managers.
      */
-    public Executor(CatalogManager catalog, StorageManager storage) {
+    public Executor(CatalogManager catalog, StorageManager storage, PersistenceManager persistence) {
         this.catalog = catalog;
         this.storage = storage;
+        this.persistence = persistence;
     }
 
     /**
@@ -78,6 +81,9 @@ public class Executor {
         catalog.addTable(tableName, schema);
         storage.createTable(tableName);
 
+        persistence.persistCatalog(catalog);
+        persistence.persistTable(tableName, List.of(), schema);
+
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success("Table '" + tableName + "' created successfully.", duration);
     }
@@ -87,6 +93,9 @@ public class Executor {
         
         catalog.dropTable(tableName);
         storage.dropTable(tableName);
+
+        persistence.persistCatalog(catalog);
+        persistence.deleteTableFile(tableName);
 
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success("Table '" + tableName + "' dropped successfully.", duration);
@@ -136,6 +145,8 @@ public class Executor {
 
         Row newRow = new Row(rowValues);
         storage.insertRow(tableName, newRow);
+
+        persistence.persistTable(tableName, storage.getRows(tableName), schema);
 
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success("1 row inserted.", duration);
@@ -257,6 +268,8 @@ public class Executor {
             storage.insertRow(tableName, r);
         }
 
+        persistence.persistTable(tableName, updatedRows, schema);
+
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success(updatedCount + " rows updated.", duration);
     }
@@ -291,6 +304,8 @@ public class Executor {
         for (Row r : remainingRows) {
             storage.insertRow(tableName, r);
         }
+
+        persistence.persistTable(tableName, remainingRows, schema);
 
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success(deletedCount + " rows deleted.", duration);
