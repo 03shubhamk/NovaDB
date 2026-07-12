@@ -45,12 +45,16 @@ public class Executor {
                 return executeInsert(insertStmt, startTime);
             } else if (stmt instanceof SelectStatement selectStmt) {
                 return executeSelect(selectStmt, startTime);
+            } else if (stmt instanceof UpdateStatement updateStmt) {
+                return executeUpdate(updateStmt, startTime);
+            } else if (stmt instanceof DeleteStatement deleteStmt) {
+                return executeDelete(deleteStmt, startTime);
             } else if (stmt instanceof TransactionStatement txnStmt) {
                 // Transactions will be implemented in Phase 7. Return mock success for now.
                 long duration = (System.nanoTime() - startTime) / 1_000_000;
                 return QueryResult.success("Transaction command '" + txnStmt.type() + "' received (Transactions unimplemented).", duration);
             } else {
-                throw new NovaDBException("Statement type execution not supported in Phase 3: " + stmt.getClass().getSimpleName());
+                throw new NovaDBException("Statement type execution not supported: " + stmt.getClass().getSimpleName());
             }
         } catch (Exception e) {
             long duration = (System.nanoTime() - startTime) / 1_000_000;
@@ -142,8 +146,16 @@ public class Executor {
         Schema schema = catalog.getSchema(tableName);
         List<Row> allRows = storage.getRows(tableName);
 
-        if (stmt.whereClause() != null) {
-            throw new NovaDBException("WHERE clause filter execution is not implemented in Phase 3 (scheduled for Phase 4).");
+        List<Row> filteredRows = new ArrayList<>();
+        for (Row row : allRows) {
+            if (stmt.whereClause() != null) {
+                Object condition = ExpressionEvaluator.evaluate(stmt.whereClause(), row, schema);
+                if (Boolean.TRUE.equals(condition)) {
+                    filteredRows.add(row);
+                }
+            } else {
+                filteredRows.add(row);
+            }
         }
 
         // Resolve projection columns and indices
@@ -169,7 +181,7 @@ public class Executor {
 
         // Map data rows
         List<List<Object>> resultRows = new ArrayList<>();
-        for (Row row : allRows) {
+        for (Row row : filteredRows) {
             List<Object> projectedCells = new ArrayList<>();
             for (int idx : targetIndices) {
                 projectedCells.add(row.getValue(idx));
@@ -189,6 +201,99 @@ public class Executor {
 
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.query(outputHeaders, resultRows, duration);
+    }
+
+    private QueryResult executeUpdate(UpdateStatement stmt, long startTime) {
+        String tableName = stmt.tableName();
+        Schema schema = catalog.getSchema(tableName);
+        List<Row> allRows = storage.getRows(tableName);
+
+        List<Row> updatedRows = new ArrayList<>();
+        int updatedCount = 0;
+
+        for (Row row : allRows) {
+            boolean matches = false;
+            if (stmt.whereClause() != null) {
+                Object condition = ExpressionEvaluator.evaluate(stmt.whereClause(), row, schema);
+                matches = Boolean.TRUE.equals(condition);
+            } else {
+                matches = true;
+            }
+
+            if (matches) {
+                updatedCount++;
+                List<Object> newCellValues = new ArrayList<>(row.values());
+
+                // Evaluate SET assignments using the ORIGINAL row values
+                List<Object> evaluatedSetValues = new ArrayList<>();
+                for (int i = 0; i < stmt.targetColumns().size(); i++) {
+                    Expression setExpr = stmt.values().get(i);
+                    Object val = ExpressionEvaluator.evaluate(setExpr, row, schema);
+                    evaluatedSetValues.add(val);
+                }
+
+                // Apply assignments, validating types
+                for (int i = 0; i < stmt.targetColumns().size(); i++) {
+                    String colName = stmt.targetColumns().get(i);
+                    int colIdx = schema.getColumnIndex(colName);
+                    if (colIdx == -1) {
+                        throw new NovaDBException("Column '" + colName + "' does not exist in table '" + tableName + "'.");
+                    }
+
+                    Object coercedVal = validateAndCoerceType(schema.getColumn(colIdx), evaluatedSetValues.get(i));
+                    newCellValues.set(colIdx, coercedVal);
+                }
+
+                updatedRows.add(new Row(newCellValues));
+            } else {
+                updatedRows.add(row);
+            }
+        }
+
+        // Rewrite updated rows to storage
+        storage.dropTable(tableName);
+        storage.createTable(tableName);
+        for (Row r : updatedRows) {
+            storage.insertRow(tableName, r);
+        }
+
+        long duration = (System.nanoTime() - startTime) / 1_000_000;
+        return QueryResult.success(updatedCount + " rows updated.", duration);
+    }
+
+    private QueryResult executeDelete(DeleteStatement stmt, long startTime) {
+        String tableName = stmt.tableName();
+        Schema schema = catalog.getSchema(tableName);
+        List<Row> allRows = storage.getRows(tableName);
+
+        List<Row> remainingRows = new ArrayList<>();
+        int deletedCount = 0;
+
+        for (Row row : allRows) {
+            boolean matches = false;
+            if (stmt.whereClause() != null) {
+                Object condition = ExpressionEvaluator.evaluate(stmt.whereClause(), row, schema);
+                matches = Boolean.TRUE.equals(condition);
+            } else {
+                matches = true;
+            }
+
+            if (matches) {
+                deletedCount++;
+            } else {
+                remainingRows.add(row);
+            }
+        }
+
+        // Rewrite remaining rows to storage
+        storage.dropTable(tableName);
+        storage.createTable(tableName);
+        for (Row r : remainingRows) {
+            storage.insertRow(tableName, r);
+        }
+
+        long duration = (System.nanoTime() - startTime) / 1_000_000;
+        return QueryResult.success(deletedCount + " rows deleted.", duration);
     }
 
     private Object evaluateLiteral(Expression expr) {
