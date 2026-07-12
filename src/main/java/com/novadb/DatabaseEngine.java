@@ -1,11 +1,14 @@
 package com.novadb;
 
+import com.novadb.catalog.CatalogManager;
 import com.novadb.common.QueryResult;
 import com.novadb.exception.NovaDBException;
+import com.novadb.executor.Executor;
 import com.novadb.lexer.Lexer;
 import com.novadb.lexer.Token;
 import com.novadb.parser.Parser;
 import com.novadb.parser.Statement;
+import com.novadb.storage.StorageManager;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -23,6 +26,9 @@ public class DatabaseEngine implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(DatabaseEngine.class.getName());
     
     private final Path dataDirectory;
+    private final CatalogManager catalog;
+    private final StorageManager storage;
+    private final Executor executor;
     private boolean active;
 
     /**
@@ -42,6 +48,9 @@ public class DatabaseEngine implements AutoCloseable {
             throw new IllegalArgumentException("Data directory path cannot be null or empty.");
         }
         this.dataDirectory = Paths.get(dataDir).toAbsolutePath().normalize();
+        this.catalog = new CatalogManager();
+        this.storage = new StorageManager();
+        this.executor = new Executor(this.catalog, this.storage);
     }
 
     /**
@@ -115,12 +124,19 @@ public class DatabaseEngine implements AutoCloseable {
             Parser parser = new Parser(tokens);
             Statement stmt = parser.parse();
 
-            long durationMs = (System.nanoTime() - startTime) / 1_000_000;
-            return QueryResult.success("Parsed AST: " + stmt.toString(), durationMs);
+            return executor.execute(stmt);
         } catch (Exception e) {
             long durationMs = (System.nanoTime() - startTime) / 1_000_000;
             return QueryResult.failure(e.getMessage(), durationMs);
         }
+    }
+
+    public CatalogManager getCatalog() {
+        return catalog;
+    }
+
+    public StorageManager getStorage() {
+        return storage;
     }
 
     @Override
