@@ -9,6 +9,8 @@ import com.novadb.lexer.Lexer;
 import com.novadb.lexer.Token;
 import com.novadb.parser.Parser;
 import com.novadb.parser.Statement;
+import com.novadb.index.IndexInfo;
+import com.novadb.index.IndexManager;
 import com.novadb.storage.PersistenceManager;
 import com.novadb.storage.Row;
 import com.novadb.storage.StorageManager;
@@ -17,6 +19,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -31,7 +34,9 @@ public class DatabaseEngine implements AutoCloseable {
     private final Path dataDirectory;
     private final CatalogManager catalog;
     private final StorageManager storage;
+    private final IndexManager indexManager;
     private final PersistenceManager persistence;
+    private final com.novadb.transaction.TransactionManager transactionManager;
     private final Executor executor;
     private boolean active;
 
@@ -54,8 +59,11 @@ public class DatabaseEngine implements AutoCloseable {
         this.dataDirectory = Paths.get(dataDir).toAbsolutePath().normalize();
         this.catalog = new CatalogManager();
         this.storage = new StorageManager();
+        this.indexManager = new IndexManager(this.dataDirectory);
+        this.transactionManager = new com.novadb.transaction.TransactionManager();
+        this.indexManager.setTransactionManager(this.transactionManager);
         this.persistence = new PersistenceManager(this.dataDirectory);
-        this.executor = new Executor(this.catalog, this.storage, this.persistence);
+        this.executor = new Executor(this.catalog, this.storage, this.persistence, this.indexManager, this.transactionManager);
     }
 
     /**
@@ -71,7 +79,7 @@ public class DatabaseEngine implements AutoCloseable {
             LOGGER.log(Level.INFO, "NovaDB starting up. Data storage path: {0}", dataDirectory);
             
             // Load catalog schemas
-            persistence.loadCatalog(catalog);
+            persistence.loadCatalog(catalog, indexManager);
             
             // Rehydrate stored table records
             for (String tableName : catalog.getTableNames()) {
@@ -80,6 +88,12 @@ public class DatabaseEngine implements AutoCloseable {
                 List<Row> rows = persistence.loadTable(tableName, schema);
                 for (Row row : rows) {
                     storage.insertRow(tableName, row);
+                }
+                
+                // Rehydrate active indexes
+                List<IndexInfo> idxList = new ArrayList<>(indexManager.getIndexesForTable(tableName));
+                for (IndexInfo info : idxList) {
+                    indexManager.loadOrRebuildIndex(info, rows, schema);
                 }
             }
             
@@ -160,6 +174,14 @@ public class DatabaseEngine implements AutoCloseable {
 
     public PersistenceManager getPersistence() {
         return persistence;
+    }
+
+    public IndexManager getIndexManager() {
+        return indexManager;
+    }
+
+    public com.novadb.transaction.TransactionManager getTransactionManager() {
+        return transactionManager;
     }
 
     @Override

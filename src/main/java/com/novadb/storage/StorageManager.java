@@ -85,4 +85,19 @@ public class StorageManager {
     public synchronized void clear() {
         tableData.clear();
     }
+
+    public synchronized Map<String, List<Row>> getTableDataSnapshot() {
+        Map<String, List<Row>> snapshot = new HashMap<>();
+        for (Map.Entry<String, List<Row>> entry : tableData.entrySet()) {
+            snapshot.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+        }
+        return snapshot;
+    }
+
+    public synchronized void restoreSnapshot(Map<String, List<Row>> snapshot) {
+        tableData.clear();
+        for (Map.Entry<String, List<Row>> entry : snapshot.entrySet()) {
+            tableData.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+        }
+    }
 }

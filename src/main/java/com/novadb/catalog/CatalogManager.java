@@ -83,4 +83,13 @@ public class CatalogManager {
     public synchronized void clear() {
         schemas.clear();
     }
+
+    public synchronized Map<String, Schema> getSchemasSnapshot() {
+        return new HashMap<>(schemas);
+    }
+
+    public synchronized void restoreSnapshot(Map<String, Schema> snapshot) {
+        schemas.clear();
+        schemas.putAll(snapshot);
+    }
 }

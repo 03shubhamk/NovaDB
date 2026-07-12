@@ -5,6 +5,10 @@ import com.novadb.common.QueryResult;
 import com.novadb.exception.NovaDBException;
 import com.novadb.parser.*;
 import com.novadb.parser.expression.*;
+import com.novadb.index.IndexInfo;
+import com.novadb.index.IndexManager;
+import com.novadb.parser.CreateIndexStatement;
+import com.novadb.parser.DropIndexStatement;
 import com.novadb.storage.PersistenceManager;
 import com.novadb.storage.Row;
 import com.novadb.storage.StorageManager;
@@ -20,14 +24,18 @@ public class Executor {
     private final CatalogManager catalog;
     private final StorageManager storage;
     private final PersistenceManager persistence;
+    private final IndexManager indexManager;
+    private final com.novadb.transaction.TransactionManager transactionManager;
 
     /**
-     * Initializes the Executor with catalog, storage, and persistence managers.
+     * Initializes the Executor with catalog, storage, persistence, index, and transaction managers.
      */
-    public Executor(CatalogManager catalog, StorageManager storage, PersistenceManager persistence) {
+    public Executor(CatalogManager catalog, StorageManager storage, PersistenceManager persistence, IndexManager indexManager, com.novadb.transaction.TransactionManager transactionManager) {
         this.catalog = catalog;
         this.storage = storage;
         this.persistence = persistence;
+        this.indexManager = indexManager;
+        this.transactionManager = transactionManager;
     }
 
     /**
@@ -52,10 +60,12 @@ public class Executor {
                 return executeUpdate(updateStmt, startTime);
             } else if (stmt instanceof DeleteStatement deleteStmt) {
                 return executeDelete(deleteStmt, startTime);
+            } else if (stmt instanceof CreateIndexStatement createIdxStmt) {
+                return executeCreateIndex(createIdxStmt, startTime);
+            } else if (stmt instanceof DropIndexStatement dropIdxStmt) {
+                return executeDropIndex(dropIdxStmt, startTime);
             } else if (stmt instanceof TransactionStatement txnStmt) {
-                // Transactions will be implemented in Phase 7. Return mock success for now.
-                long duration = (System.nanoTime() - startTime) / 1_000_000;
-                return QueryResult.success("Transaction command '" + txnStmt.type() + "' received (Transactions unimplemented).", duration);
+                return executeTransaction(txnStmt, startTime);
             } else {
                 throw new NovaDBException("Statement type execution not supported: " + stmt.getClass().getSimpleName());
             }
@@ -81,8 +91,10 @@ public class Executor {
         catalog.addTable(tableName, schema);
         storage.createTable(tableName);
 
-        persistence.persistCatalog(catalog);
-        persistence.persistTable(tableName, List.of(), schema);
+        if (!transactionManager.isInTransaction()) {
+            persistence.persistCatalog(catalog, indexManager);
+            persistence.persistTable(tableName, List.of(), schema);
+        }
 
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success("Table '" + tableName + "' created successfully.", duration);
@@ -93,9 +105,12 @@ public class Executor {
         
         catalog.dropTable(tableName);
         storage.dropTable(tableName);
+        indexManager.deleteTableIndexes(tableName);
 
-        persistence.persistCatalog(catalog);
-        persistence.deleteTableFile(tableName);
+        if (!transactionManager.isInTransaction()) {
+            persistence.persistCatalog(catalog, indexManager);
+            persistence.deleteTableFile(tableName);
+        }
 
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success("Table '" + tableName + "' dropped successfully.", duration);
@@ -146,7 +161,10 @@ public class Executor {
         Row newRow = new Row(rowValues);
         storage.insertRow(tableName, newRow);
 
-        persistence.persistTable(tableName, storage.getRows(tableName), schema);
+        indexManager.rebuildTableIndexes(tableName, storage.getRows(tableName), schema);
+        if (!transactionManager.isInTransaction()) {
+            persistence.persistTable(tableName, storage.getRows(tableName), schema);
+        }
 
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success("1 row inserted.", duration);
@@ -158,14 +176,26 @@ public class Executor {
         List<Row> allRows = storage.getRows(tableName);
 
         List<Row> filteredRows = new ArrayList<>();
-        for (Row row : allRows) {
-            if (stmt.whereClause() != null) {
-                Object condition = ExpressionEvaluator.evaluate(stmt.whereClause(), row, schema);
-                if (Boolean.TRUE.equals(condition)) {
+        List<Integer> indexMatches = getIndexMatchRows(stmt.whereClause(), tableName, schema);
+
+        if (indexMatches != null) {
+            // Index lookup matches. Fetch only matched row positions
+            for (int pos : indexMatches) {
+                if (pos >= 0 && pos < allRows.size()) {
+                    filteredRows.add(allRows.get(pos));
+                }
+            }
+        } else {
+            // Fallback: Full Scan
+            for (Row row : allRows) {
+                if (stmt.whereClause() != null) {
+                    Object condition = ExpressionEvaluator.evaluate(stmt.whereClause(), row, schema);
+                    if (Boolean.TRUE.equals(condition)) {
+                        filteredRows.add(row);
+                    }
+                } else {
                     filteredRows.add(row);
                 }
-            } else {
-                filteredRows.add(row);
             }
         }
 
@@ -268,7 +298,10 @@ public class Executor {
             storage.insertRow(tableName, r);
         }
 
-        persistence.persistTable(tableName, updatedRows, schema);
+        if (!transactionManager.isInTransaction()) {
+            persistence.persistTable(tableName, updatedRows, schema);
+        }
+        indexManager.rebuildTableIndexes(tableName, updatedRows, schema);
 
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success(updatedCount + " rows updated.", duration);
@@ -305,7 +338,10 @@ public class Executor {
             storage.insertRow(tableName, r);
         }
 
-        persistence.persistTable(tableName, remainingRows, schema);
+        if (!transactionManager.isInTransaction()) {
+            persistence.persistTable(tableName, remainingRows, schema);
+        }
+        indexManager.rebuildTableIndexes(tableName, remainingRows, schema);
 
         long duration = (System.nanoTime() - startTime) / 1_000_000;
         return QueryResult.success(deletedCount + " rows deleted.", duration);
@@ -316,6 +352,77 @@ public class Executor {
             throw new NovaDBException("Only literal values are supported in Phase 3 INSERT operations.");
         }
         return ((LiteralExpression) expr).value();
+    }
+
+    private QueryResult executeCreateIndex(CreateIndexStatement stmt, long startTime) {
+        String indexName = stmt.indexName();
+        String tableName = stmt.tableName();
+        String columnName = stmt.columnName();
+
+        Schema schema = catalog.getSchema(tableName);
+        List<Row> rows = storage.getRows(tableName);
+
+        indexManager.createIndex(indexName, tableName, columnName, rows, schema);
+        if (!transactionManager.isInTransaction()) {
+            persistence.persistCatalog(catalog, indexManager);
+        }
+
+        long duration = (System.nanoTime() - startTime) / 1_000_000;
+        return QueryResult.success("Index '" + indexName + "' created successfully.", duration);
+    }
+
+    private QueryResult executeDropIndex(DropIndexStatement stmt, long startTime) {
+        String indexName = stmt.indexName();
+        indexManager.dropIndex(indexName);
+        if (!transactionManager.isInTransaction()) {
+            persistence.persistCatalog(catalog, indexManager);
+        }
+
+        long duration = (System.nanoTime() - startTime) / 1_000_000;
+        return QueryResult.success("Index '" + indexName + "' dropped successfully.", duration);
+    }
+
+    private List<Integer> getIndexMatchRows(Expression whereClause, String tableName, Schema schema) {
+        if (!(whereClause instanceof BinaryExpression binaryExpr)) {
+            return null;
+        }
+        if (!binaryExpr.operator().equals("=")) {
+            return null;
+        }
+
+        String colName = null;
+        Object literalVal = null;
+
+        if (binaryExpr.left() instanceof ColumnExpression colExpr && binaryExpr.right() instanceof LiteralExpression litExpr) {
+            colName = colExpr.name();
+            literalVal = litExpr.value();
+        } else if (binaryExpr.right() instanceof ColumnExpression colExpr && binaryExpr.left() instanceof LiteralExpression litExpr) {
+            colName = colExpr.name();
+            literalVal = litExpr.value();
+        }
+
+        if (colName == null) {
+            return null;
+        }
+
+        List<IndexInfo> idxList = indexManager.getIndexesForTable(tableName);
+        for (IndexInfo idx : idxList) {
+            if (idx.columnName().equalsIgnoreCase(colName)) {
+                return indexManager.lookup(idx.indexName(), literalVal);
+            }
+        }
+
+        return null;
+    }
+
+    private QueryResult executeTransaction(TransactionStatement stmt, long startTime) {
+        switch (stmt.type()) {
+            case BEGIN -> transactionManager.begin(catalog, storage, indexManager);
+            case COMMIT -> transactionManager.commit(catalog, storage, indexManager, persistence);
+            case ROLLBACK -> transactionManager.rollback(catalog, storage, indexManager);
+        }
+        long duration = (System.nanoTime() - startTime) / 1_000_000;
+        return QueryResult.success("Transaction command '" + stmt.type() + "' executed successfully.", duration);
     }
 
     private Object validateAndCoerceType(Column column, Object value) {
