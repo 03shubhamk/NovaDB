@@ -122,3 +122,4 @@ Inside the console, you can execute SQL commands or type `.exit` to shutdown the
 mvn test
 ```
 There are currently **63 integration tests** covering the lexer, parser, storage persistence, index search acceleration, and transaction isolation layers.
+
